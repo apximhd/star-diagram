@@ -1,0 +1,653 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Star Diagram Builder</title>
+    <script src="https://cdn.jsdelivr.net/npm/plotly.js-dist@2.9.0/plotly.min.js"></script>
+    <script type="text/javascript">
+        let globalCV = null;
+        var Module = {
+            onRuntimeInitialized: async function() {
+                console.log('OpenCV.js loaded');
+                globalCV = await cv;
+                console.log('cv:', globalCV);
+                console.log('cv.Mat:', globalCV.Mat);
+                if (typeof globalCV.Mat === 'undefined') {
+                    alert("cv.Mat is undefined");
+                } else {
+                    // alert("cv.Mat is defined!");
+                    document.getElementById('processButton').disabled = false;
+                }
+            }
+        };
+    </script>
+    <script async src="https://docs.opencv.org/4.x/opencv.js" type="text/javascript"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        text {
+            font-size: 12px;
+            font-style: italic;
+        }
+        label {
+            display: inline-block;
+            width: 300px;
+            margin-top: 10px;
+        }
+        input[type="file"] {
+            width: 100%;
+            font-size: 16px;
+            padding: 5px;
+            box-sizing: border-box;
+        }
+        input[type="number"] {
+            width: 50px;
+        }
+        button {
+            margin-top: 10px;
+            padding: 3px 3px;
+            font-size: 16px;
+            width: 360px;
+        }
+        #plot {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Star Diagram Builder</h1>
+    <input type="file" id="fitsFile">
+    <br>
+    <label for="threshold">Threshold:</label>
+    <input type="number" id="threshold" value="5">
+    <br>
+    <text>Threshold determines the sensitivity for detecting stars. A higher value detects fewer, brighter stars, while a lower value detects more, fainter stars. Typical range: 3–10.</text>
+    <br>
+    <label for="fwhm">FWHM:</label>
+    <input type="number" id="fwhm" value="3">
+    <br>
+    <text>FWHM represents the typical width of a star's profile in pixels, measured at half its maximum intensity. Adjust this to match the expected size of stars in your image. Typical range: 2–5 pixels.</text>
+    <br>
+
+    <label for="rtfss">Relaxed tolerance for smaller stars: </label>
+    <input type="number" id="rtfss" value="2.0" step="0.1">
+    <br>
+    <text>Relaxed tolerance for smaller stars sets how much the star’s size (FWHM) can differ from the expected value. Use 1–10; 2.0 works well for detecting smaller stars in Seestar S50 images.</text>
+    <br>
+    <label for="radius">Radius:</label>
+    <input type="number" id="radius" value="3">
+    <br>
+    <text>Radius defines the size of the circular aperture around each star for measuring its intensity. A larger radius includes more background noise but captures fainter star light. Typical range: 2–5 pixels.</text>
+    <br>
+    <label for="default_mag_zero_point">Default Magnitude Zero Point:</label>
+    <input type="number" id="default_mag_zero_point" value="25.0">
+    <br>
+    <text>Default Magnitude Zero Point sets the reference magnitude value used to calculate the apparent magnitude (𝑀𝑣) of stars in the Hertzsprung-Russell diagram. This value is typically 25.0 as it is a common default in astronomical imaging when the FITS file does not provide a specific MAGZP parameter. Adjust this value if you have calibration data or specific requirements for your observations.</text>
+    <br>
+    <button id="processButton" onclick="processFITS()">Build Diagram</button>
+    <div id="plot"></div>
+    <script>
+        document.getElementById('processButton').disabled = true;
+
+        function processFITS() {
+            if (!globalCV || typeof globalCV.Mat === 'undefined') {
+                alert("OpenCV is not loaded yet. Please try again.");
+                return;
+            }
+
+            const fileInput = document.getElementById('fitsFile');
+            const threshold = parseFloat(document.getElementById('threshold').value);
+            const fwhm = parseFloat(document.getElementById('fwhm').value);
+            const rtfss = parseFloat(document.getElementById('rtfss').value);
+            const radius = parseFloat(document.getElementById('radius').value);
+            const defaultMagZeroPoint = parseFloat(document.getElementById('default_mag_zero_point').value);
+
+            if (fileInput.files.length === 0) {
+                alert("Please select a FITS file.");
+                return;
+            }
+
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            reader.onload = function(event) {
+                const arrayBuffer = event.target.result;
+                const fitsData = loadFitsImage(arrayBuffer, defaultMagZeroPoint);
+                if (!fitsData) return;
+
+                const { data: image, magZeroPoint } = fitsData;
+
+                const stars = findStars(image[1], threshold, fwhm, rtfss); // G-channel for star detection
+                const intensities = computeIntensities(image, stars, radius);
+                console.log("Star intensities:", intensities);
+
+                const G_R = intensities.map(([r, g, b]) => (b - g) / (b + g));
+                const M_V = intensities.map(([r, g, b]) => -2.5 * Math.log10(r + g + b) + magZeroPoint);
+                const B_G = intensities.map(([r, g, b]) => (g - r) / (g + r));
+
+                console.log("G-R:", G_R);
+                console.log("M_V:", M_V);
+
+                // Normalize G-R for colors from blue (0) to red (255), using a coolwarm-like palette
+                const minGR = Math.min(...G_R);
+                const maxGR = Math.max(...G_R);
+                const colors = G_R.map(gr => {
+                    const normalized = (gr - minGR) / (maxGR - minGR); // 0 to 1
+                    const red = Math.round(255 * normalized); // Higher G-R -> redder
+                    const blue = Math.round(255 * (1 - normalized)); // Lower G-R -> bluer
+                    return `rgb(${red}, 64, ${blue})`;
+                });
+
+// Trace 1: M_V vs. G-R
+const trace1 = {
+            x: G_R,
+            y: M_V,
+            mode: 'markers',
+            marker: {
+                color: colors,
+                size: 10,
+                symbol: 'star' // Star-shaped marker
+            },
+            type: 'scatter',
+            name: 'Mv vs G-R'
+        };
+
+        // Trace 2: B_V vs. G-R
+        const trace2 = {
+            x: G_R,
+            y: B_G,
+            mode: 'markers',
+            marker: {
+                color: colors,
+                size: 10,
+                symbol: 'star' // Star-shaped marker
+            },
+            type: 'scatter',
+            name: 'B-G vs G-R'
+        };
+
+        // Layout for M_V vs. G-R
+        const layout1 = {
+            title: 'Mv vs G-R Diagram',
+            xaxis: { title: 'Color Index G-R' },
+            yaxis: {
+                title: { text: 'Apparent magnitude Mv', standoff: 10 },
+                autorange: 'reversed' // Brighter stars (lower M_v) at the top
+            },
+            height: 500, // Slightly smaller to fit side by side
+            width: 600,
+            hovermode: 'closest',
+            margin: { r: 20, t: 70, b: 50, l: 50 }
+            // showlegend: true
+        };
+
+        // Layout for B_V vs. G-R
+        const layout2 = {
+            title: 'B-G vs G-R Diagram',
+            xaxis: { title: 'Color Index G-R' },
+            yaxis: {
+                title: { text: 'Color Index B-G', standoff: 10 }
+            },
+            height: 500, // Slightly smaller to fit side by side
+            width: 600,
+            hovermode: 'closest',
+            margin: { r: 20, t: 70, b: 50, l: 50 }
+            // showlegend: true
+        };
+
+        // Create a container for two plots side by side
+        document.getElementById('plot').innerHTML = `
+            <div id="plot1" style="float: left; width: 50%;"></div>
+            <div id="plot2" style="float: left; width: 50%;"></div>
+            <div style="clear: both;"></div>
+        `;
+
+        // Render the first plot (Mv vs. G-R)
+        Plotly.newPlot('plot1', [trace1], layout1, { mathjax: 'cdn' });
+
+        // Render the second plot (B-G vs. G-R)
+        Plotly.newPlot('plot2', [trace2], layout2, { mathjax: 'cdn' });            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function loadFitsImage(arrayBuffer, defaultMagZeroPoint) {
+            try {
+                const dataView = new DataView(arrayBuffer);
+                let header = {};
+                let dataStart = 0;
+                let imageData = null;
+                let magZeroPoint = defaultMagZeroPoint;
+
+                let headerString = '';
+                let offset = 0;
+                let endFound = false;
+
+                // Read the header until END
+                while (offset < arrayBuffer.byteLength && !endFound) {
+                    const block = new Uint8Array(arrayBuffer.slice(offset, offset + 2880));
+                    for (let i = 0; i < block.length; i += 80) {
+                        const line = String.fromCharCode(...block.slice(i, i + 80));
+                        headerString += line + '\n';
+                        if (line.startsWith('END')) {
+                            endFound = true;
+                            dataStart = offset + i + 80;
+                            break;
+                        }
+                    }
+                    offset += 2880;
+                }
+
+                if (!endFound) throw new Error("END keyword not found in header.");
+
+                // Parse the header
+                const lines = headerString.split('\n');
+                let bscale = 1.0; // Default
+                let bzero = 0.0;  // Default
+                lines.forEach(line => {
+                    const [key, value] = line.split(/=/).map(s => s.trim());
+                    if (key === 'MAGZP') magZeroPoint = parseFloat(value) || defaultMagZeroPoint;
+                    if (key === 'NAXIS1') header.naxis1 = parseInt(value);
+                    if (key === 'NAXIS2') header.naxis2 = parseInt(value);
+                    if (key === 'NAXIS3') header.naxis3 = parseInt(value);
+                    if (key === 'BITPIX') header.bitpix = parseInt(value);
+                    if (key === 'BSCALE') bscale = parseFloat(value) || 1.0;
+                    if (key === 'BZERO') bzero = parseFloat(value) || 0.0;
+                });
+
+                console.log("Full header:", headerString);
+
+                if (!header.naxis1 || !header.naxis2) {
+                    throw new Error("Failed to determine image dimensions (NAXIS1/NAXIS2 missing).");
+                }
+
+                if (header.bitpix !== 16) {
+                    throw new Error(`BITPIX ${header.bitpix} is not supported. Expected 16 for 16-bit integers.`);
+                }
+
+                const pixelSize = 2; // 16 bits = 2 bytes for Uint16
+                const dataOffset = Math.ceil(dataStart / 2880) * 2880;
+                const imageSize = header.naxis1 * header.naxis2 * (header.naxis3 || 1);
+
+                if (dataOffset + imageSize * pixelSize > arrayBuffer.byteLength) {
+                    throw new Error("Insufficient data in file for specified dimensions.");
+                }
+
+                // Read raw data as Uint16Array, accounting for big-endian (FITS uses big-endian)
+                let rawData = new Uint16Array(imageSize);
+                for (let i = 0; i < imageSize; i++) {
+                    const byteOffset = dataOffset + (i * pixelSize);
+                    rawData[i] = dataView.getUint16(byteOffset, false); // false = big-endian
+                }
+
+                // Output raw data for debugging
+                console.log("Raw data sample (first 3 values):", rawData[0], rawData[1], rawData[2]);
+
+                // Apply BSCALE and BZERO 
+                let scaledImageData = new Uint16Array(imageSize);
+                for (let i = 0; i < imageSize; i++) {
+                    let scaledValue = (rawData[i] - bzero) * bscale;
+                    // Limit the range for 16-bit data (0–65535)
+                    scaledImageData[i] = Math.max(0, Math.min(65535, Math.round(scaledValue)));
+                }
+
+                // Ensure data isn’t zeroed out (debugging)
+                if (scaledImageData[0] === 0) {
+                    console.warn("Scaled data at 0,0 is 0, checking normalization.");
+                    // Try normalization if data is incorrect
+                    for (let i = 0; i < imageSize; i++) {
+                        let scaledValue = (rawData[i] - bzero) * bscale / 10.6; // Normalization based on previous data
+                        scaledImageData[i] = Math.max(0, Math.min(65535, Math.round(scaledValue)));
+                    }
+                }
+
+                let image;
+                const width = header.naxis1;  // Width (columns)
+                const height = header.naxis2; // Height (rows)
+                const channels = header.naxis3 || 1;
+
+                if (channels > 1) {
+                    image = [];
+                    for (let c = 0; c < channels; c++) {
+                        const channel = [];
+                        for (let y = 0; y < height; y++) {
+                            const row = [];
+                            for (let x = 0; x < width; x++) {
+                                const index = c * width * height + y * width + x;
+                                row.push(scaledImageData[index]);
+                            }
+                            channel.push(row);
+                        }
+                        image.push(channel);
+                    }
+                } else {
+                    image = [];
+                    for (let y = 0; y < height; y++) {
+                        const row = [];
+                        for (let x = 0; x < width; x++) {
+                            row.push(scaledImageData[y * width + x]);
+                        }
+                        image.push(row);
+                    }
+                }
+
+                console.log("Image structure:", image.length, image[0].length, image[0][0].length);
+                console.log("First values of G channel:", image[1][0].slice(0, 10));
+                console.log("Image data sample (R,G,B at 0,0):", image[0][0][0], image[1][0][0], image[2][0][0]);
+                return { data: image, magZeroPoint };
+            } catch (error) {
+                console.error(error);
+                return null;
+            }
+        }
+
+
+        // function findStars(image, threshold = 5, fwhm = 3) {
+        //     const height = image.length;
+        //     const width = image[0].length;
+
+        //     // Convert 2D Uint16 array to flat Uint16Array
+        //     const flatImage = new Uint16Array(height * width);
+        //     for (let y = 0; y < height; y++) {
+        //         for (let x = 0; x < width; x++) {
+        //             flatImage[y * width + x] = image[y][x];
+        //         }
+        //     }
+
+        //     // 1. Create OpenCV matrix for 16-bit data
+        //     let src = new globalCV.Mat(height, width, globalCV.CV_16UC1);
+        //     src.data16U.set(flatImage);
+
+        //     // 2. Calculate mean and standard deviation
+        //     let mean = new globalCV.Mat();
+        //     let stddev = new globalCV.Mat();
+        //     globalCV.meanStdDev(src, mean, stddev);
+        //     const meanValue = mean.data64F[0];
+        //     const stdValue = stddev.data64F[0];
+        //     mean.delete();
+        //     stddev.delete();
+
+        //     // 3. Subtract mean from the image
+        //     let normalized = new globalCV.Mat();
+        //     globalCV.subtract(src, new globalCV.Mat(height, width, globalCV.CV_16UC1, new globalCV.Scalar(meanValue)), normalized);
+
+        //     // 4. Convert to 32-bit floating point for Gaussian filtering
+        //     let floatImg = new globalCV.Mat();
+        //     normalized.convertTo(floatImg, globalCV.CV_32F);
+
+        //     // 5. Apply Gaussian filtering for star detection (analogous to fwhm)
+        //     let blurred = new globalCV.Mat();
+        //     const sigma = fwhm / (2 * Math.sqrt(2 * Math.log(2))); // Convert FWHM to sigma
+        //     globalCV.GaussianBlur(floatImg, blurred, new globalCV.Size(0, 0), sigma, sigma);
+
+        //     // 6. Threshold for star detection
+        //     const starThreshold = threshold * stdValue;
+        //     let binary = new globalCV.Mat();
+        //     globalCV.threshold(blurred, binary, starThreshold, 1, globalCV.THRESH_BINARY);
+
+        //     // 7. Search for local maxima
+        //     let stars = [];
+        //     for (let y = 0; y < height; y++) {
+        //         for (let x = 0; x < width; x++) {
+        //             if (binary.data32F[y * width + x] === 1) { // Pixel above threshold
+        //                 let isLocalMax = true;
+        //                 for (let dy = -2; dy <= 2; dy++) { // Check 5x5 neighborhood
+        //                     for (let dx = -2; dx <= 2; dx++) {
+        //                         const ny = y + dy;
+        //                         const nx = x + dx;
+        //                         if (ny >= 0 && ny < height && nx >= 0 && nx < width && !(dy === 0 && dx === 0)) {
+        //                             if (blurred.data32F[ny * width + nx] > blurred.data32F[y * width + x]) {
+        //                                 isLocalMax = false;
+        //                                 break;
+        //                             }
+        //                         }
+        //                     }
+        //                     if (!isLocalMax) break;
+        //                 }
+        //                 if (isLocalMax) {
+        //                     // Calculate centroid (simple approximation)
+        //                     let sumX = 0, sumY = 0, sumIntensity = 0;
+        //                     for (let dy = -1; dy <= 1; dy++) {
+        //                         for (let dx = -1; dx <= 1; dx++) {
+        //                             const ny = y + dy;
+        //                             const nx = x + dx;
+        //                             if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+        //                                 const val = normalized.data16U[ny * width + nx];
+        //                                 sumX += nx * val;
+        //                                 sumY += ny * val;
+        //                                 sumIntensity += val;
+        //                             }
+        //                         }
+        //                     }
+        //                     const xCentroid = sumIntensity > 0 ? sumX / sumIntensity : x;
+        //                     const yCentroid = sumIntensity > 0 ? sumY / sumIntensity : y;
+
+        //                     // Check intensity (original image)
+        //                     const xRounded = Math.round(xCentroid);
+        //                     const yRounded = Math.round(yCentroid);
+        //                     if (xRounded >= 0 && xRounded < width && yRounded >= 0 && yRounded < height) {
+        //                         const originalIntensity = image[yRounded][xRounded];
+        //                         if (originalIntensity <= 64000) {
+        //                             // Calculate FWHM (simple approximation)
+        //                             const fwhmValue = calculateFWHM(image, xRounded, yRounded, width, height, originalIntensity);
+        //                             if (Math.abs(fwhmValue - fwhm) <= 1.5) {
+        //                                 stars.push([xCentroid, yCentroid]);
+        //                             }
+        //                         }
+        //                     }
+        //                 }
+        //             }
+        //         }
+        //     }
+
+        //     // 8. Free memory
+        //     src.delete();
+        //     normalized.delete();
+        //     floatImg.delete();
+        //     blurred.delete();
+        //     binary.delete();
+
+        //     console.log("Found stars:", stars);
+        //     return stars.sort((a, b) => b[1] - a[1]); // Sort by y
+        // }
+
+
+        function findStars(image, threshold = 5, fwhm = 3, rtfss = 2.0) {
+            const height = image.length;
+            const width = image[0].length;
+
+            // Convert 2D Uint16 array to flat Uint16Array
+            const flatImage = new Uint16Array(height * width);
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    flatImage[y * width + x] = image[y][x];
+                }
+            }
+
+            // 1. Create OpenCV matrix for 16-bit data
+            let src = new globalCV.Mat(height, width, globalCV.CV_16UC1);
+            src.data16U.set(flatImage);
+
+            // 2. Calculate mean and standard deviation
+            let mean = new globalCV.Mat();
+            let stddev = new globalCV.Mat();
+            globalCV.meanStdDev(src, mean, stddev);
+            const meanValue = mean.data64F[0];
+            const stdValue = stddev.data64F[0];
+            mean.delete();
+            stddev.delete();
+
+            // Debug: Log mean and standard deviation
+            console.log("Mean:", meanValue, "StdDev:", stdValue);
+
+            // 3. Subtract mean from the image (normalize)
+            let normalized = new globalCV.Mat();
+            globalCV.subtract(src, new globalCV.Mat(height, width, globalCV.CV_16UC1, new globalCV.Scalar(meanValue)), normalized);
+
+            // 4. Convert to 32-bit floating point for Gaussian filtering
+            let floatImg = new globalCV.Mat();
+            normalized.convertTo(floatImg, globalCV.CV_32F);
+
+            // 5. Apply Gaussian filtering for star detection (analogous to fwhm)
+            let blurred = new globalCV.Mat();
+            const sigma = fwhm / (2 * Math.sqrt(2 * Math.log(2))); // Convert FWHM to sigma
+            // Use a fixed kernel size (5x5) to match DAOStarFinder behavior
+            globalCV.GaussianBlur(floatImg, blurred, new globalCV.Size(5, 5), sigma, sigma);
+
+            // 6. Threshold for star detection (match DAOStarFinder)
+            const starThreshold = threshold * stdValue;
+            console.log("Star Threshold:", starThreshold); // Debug: Log the threshold value
+            let binary = new globalCV.Mat();
+            globalCV.threshold(blurred, binary, starThreshold, 1, globalCV.THRESH_BINARY);
+
+            // Debug: Check if any pixels exceed the threshold
+            let thresholdedPixels = 0;
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (binary.data32F[y * width + x] === 1) thresholdedPixels++;
+                }
+            }
+            console.log("Number of pixels above threshold:", thresholdedPixels);
+
+            // 7. Search for local maxima, adjusting neighborhood size for smaller image
+            let stars = [];
+            for (let y = 0; y < height; y++) {
+                for (let x = 0; x < width; x++) {
+                    if (binary.data32F[y * width + x] === 1) { // Pixel above threshold
+                        let isLocalMax = true;
+                        // Use 3x3 neighborhood for smaller image
+                        for (let dy = -1; dy <= 1; dy++) {
+                            for (let dx = -1; dx <= 1; dx++) {
+                                const ny = y + dy;
+                                const nx = x + dx;
+                                if (ny >= 0 && ny < height && nx >= 0 && nx < width && !(dy === 0 && dx === 0)) {
+                                    if (blurred.data32F[ny * width + nx] > blurred.data32F[y * width + x]) {
+                                        isLocalMax = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if (!isLocalMax) break;
+                        }
+                        if (isLocalMax) {
+                            // Calculate centroid (simple approximation)
+                            let sumX = 0, sumY = 0, sumIntensity = 0;
+                            for (let dy = -1; dy <= 1; dy++) {
+                                for (let dx = -1; dx <= 1; dx++) {
+                                    const ny = y + dy;
+                                    const nx = x + dx;
+                                    if (ny >= 0 && ny < height && nx >= 0 && nx < width) {
+                                        const val = normalized.data16U[ny * width + nx];
+                                        sumX += nx * val;
+                                        sumY += ny * val;
+                                        sumIntensity += val;
+                                    }
+                                }
+                            }
+                            const xCentroid = sumIntensity > 0 ? sumX / sumIntensity : x;
+                            const yCentroid = sumIntensity > 0 ? sumY / sumIntensity : y;
+
+                            // Check intensity (original image) and adjust filter for smaller stars
+                            const xRounded = Math.round(xCentroid);
+                            const yRounded = Math.round(yCentroid);
+                            if (xRounded >= 0 && xRounded < width && yRounded >= 0 && yRounded < height) {
+                                const originalIntensity = image[yRounded][xRounded];
+                                console.log(`Potential star at (${xRounded}, ${yRounded}) with intensity:`, originalIntensity);
+                                // Calculate FWHM (simple approximation) and relax the filter
+                                const fwhmValue = calculateFWHM(image, xRounded, yRounded, width, height, originalIntensity);
+                                console.log("FWHM value:", fwhmValue);
+                                if (Math.abs(fwhmValue - fwhm) <= rtfss) { // Relaxed tolerance for smaller stars
+                                    stars.push([xCentroid, yCentroid]);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 8. Free memory
+            src.delete();
+            normalized.delete();
+            floatImg.delete();
+            blurred.delete();
+            binary.delete();
+
+            console.log("Found stars:", stars);
+            return stars.sort((a, b) => b[1] - a[1]); // Sort by y (to match Python)
+        }
+
+
+
+        function computeIntensities(image, stars, radius) {
+            const intensities = [];
+            const channels = image.length; // 3 (R, G, B)
+            const height = image[0].length;
+            const width = image[0][0].length;
+            console.log("Image dimensions:", channels, width, height);
+
+            for (const star of stars) {
+                const xcentroid = star[0];
+                const ycentroid = star[1];
+                const starIntensity = [];
+
+                for (let c = 0; c < channels; c++) {
+                    let intensitySum = 0;
+
+                    for (let dy = -radius; dy <= radius; dy++) {
+                        for (let dx = -radius; dx <= radius; dx++) {
+                            const x = Math.round(xcentroid + dx);
+                            const y = Math.round(ycentroid + dy);
+
+                            if (x >= 0 && x < width && y >= 0 && y < height) {
+                                // Check if the pixel is within a circle of radius radius
+                                const dxCenter = x - xcentroid;
+                                const dyCenter = y - ycentroid;
+                                const distance = Math.sqrt(dxCenter * dxCenter + dyCenter * dyCenter);
+                                if (distance <= radius) {
+                                    intensitySum += image[c][y][x];
+                                }
+                            }
+                        }
+                    }
+                    starIntensity.push(intensitySum); // Total intensity in the circle
+                }
+
+                intensities.push(starIntensity);
+            }
+
+            console.log("Intensities:", intensities);
+            return intensities;
+        }
+
+        function calculateFWHM(image, xCenter, yCenter, width, height, peakIntensity) {
+            const halfMax = peakIntensity / 2;
+            let leftX = xCenter;
+            let rightX = xCenter;
+
+            // Find the left boundary
+            while (leftX > 0 && image[yCenter][leftX] > halfMax) {
+                leftX--;
+            }
+            // Find the right boundary
+            while (rightX < width - 1 && image[yCenter][rightX] > halfMax) {
+                rightX++;
+            }
+            const fwhmX = rightX - leftX;
+
+            // Analysis along the vertical axis
+            let topY = yCenter;
+            let bottomY = yCenter;
+            while (topY > 0 && image[topY][xCenter] > halfMax) {
+                topY--;
+            }
+            while (bottomY < height - 1 && image[bottomY][xCenter] > halfMax) {
+                bottomY++;
+            }
+            const fwhmY = bottomY - topY;
+
+            return (fwhmX + fwhmY) / 2;
+        }
+    </script>
+</body>
+</html>
