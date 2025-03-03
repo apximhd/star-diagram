@@ -19,3 +19,5 @@ Then, click the Build Diagram button.
 The illustration shows an example of diagrams generated for the Pleiades star cluster.
 
 There is also a Python file that performs the same tasks but much more elegantly, as it uses specialized astronomical libraries that have no equivalents in JavaScript.
+
+<img width="958" alt="image" src="https://github.com/user-attachments/assets/25ea7d7b-edf7-4f25-95c1-4aa235eb25ec" />
